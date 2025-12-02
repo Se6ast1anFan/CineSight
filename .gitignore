@@ -5,6 +5,7 @@
 *.h5
 *.jpg
 *.mp4
+*.mp3
 *.avi
 .vscode
 *.py[cod]
@@ -15,3 +16,4 @@
 *.webm
 *.ipynb_checkpoints*
 *.md
+*.env
