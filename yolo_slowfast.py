@@ -37,48 +37,78 @@ def generate_description(actions_counter, start_sec, end_sec, last_narrative):
     if not actions_counter:
         return ""
     
-    # 提取前4个高频标签（动作或物体）
-    top_actions = [k for k, v in actions_counter.most_common(4)]
-    actions_str = ", ".join(top_actions)
+    # 1. 数据准备：保留频次信息，格式如 "car(26), run(8), stand(4)"
+    top_items_with_counts = [f"{k}({v})" for k, v in actions_counter.most_common(5)]
+    actions_str = ", ".join(top_items_with_counts)
     
     prompt = f"""
-    任务：根据检测到的【视觉标签】（包含动作和物体），生成一句极简的中文描述。
-    
-    【上一段描述】：{last_narrative}
-    【当前检测标签】：{actions_str}
-    
-    【严格约束】：
-    1. **拒绝幻觉**：只直译标签。如果标签有 "car"，就说"有车"；如果只有 "walk"，就说"有人在走"。
-    2. **去重机制**：如果核心含义与【上一段描述】基本一致（例如车一直在开），输出 "SKIP"。
-    3. **字数限制**：严格控制在 **20个汉字以内**。
-    4. **纯中文**：将英文标签翻译成中文。
-    
-    【输出格式】：
-    - 有新内容：输出中文描述。
-    - 无变化：输出 SKIP。
+    【角色设定】
+    你是指向视障人士的专业影视音频解说员（Audio Description Specialist），严格遵循 Netflix 和 BBC 的无障碍解说标准。
+    你的任务是结合【标签频次权重】排除干扰，生成一句简短、客观、实时的场景解说。
+
+    【输入数据】（标签名+出现次数）：{actions_str}
+    【上一时段解说】：{last_narrative}
+
+    【第一步：数据清洗逻辑（必须执行）】
+    1. **权重法则**：
+       - 如果 物体(如 car) 的频次远高于 动作(如 run)，说明是物体在移动导致的光流误判，**忽略该动作**。
+       - 示例：输入 "car(26), run(8)" -> 判定为只有车，没有人跑。
+    2. **组合联想**：
+       - 如果 动作(sit) 和 物体(car) 频次都高，组合为 "某人坐进车内" 或 "车内有人"。
+       - 示例：输入 "sit(10), car(12)" -> 输出 "某人坐进车内" 或 "车内有人"。
+
+    【第二步：专业解说原则（严格遵守）】
+    1. **现在时态与主动语态**：
+       - 错误：画面中有一辆车在行驶。 (冗余)
+       - 正确：车辆行驶。 (BBC标准)
+       - 正确：两人交谈。 (Netflix标准)
+    2. **信息分级 (Who > Do > What)**：
+       - 优先描述“人做了什么动作”（如：run, talk, sit）。
+       - 其次描述“出现了什么核心物体”（如：car, dog）。
+       - 忽略低频背景噪音。
+    3. **去重与静默 (Silence is Gold)**：
+       - 如果清洗后的画面逻辑与【上一时段解说】大体一致（如一直在 "stand, talk"），**必须保持静默**，直接输出 "SKIP"。
+       - 只有画面发生**显著变化**（如动作改变、新物体出现）时才插话。
+    4. **严禁幻觉**：
+       - 标签里没有的物品绝不提及。
+       - 不猜测人物关系（不说“父子”，只说“两人”）。
+
+    【输出格式约束】：
+    - **字数限制**：15个汉字以内（确保在3秒内读完）。
+    - **纯文本**：不要标点符号以外的任何字符。
+    - **判定**：如果无需播报，仅输出单词 SKIP。
+
+    请生成解说：
     """
     
     try:
         completion = client.chat.completions.create(
             model=model_id,
             messages=[
-                {"role": "system", "content": "你是一个严谨的视觉标签翻译员。"},
+                {"role": "system", "content": "你是一个严谨的、基于数据权重的盲人辅助解说 AI。"},
                 {"role": "user", "content": prompt},
             ],
+            temperature=0.1, # 低温以保证逻辑严格执行
         )
         description = completion.choices[0].message.content.strip()
-        description = description.replace('"', '').replace("'", "")
+        description = description.replace('"', '').replace("'", "").replace("\n", "")
         
+        # 逻辑判断：去重或跳过
         if "SKIP" in description or description == last_narrative:
-            print(f"Time {start_sec}-{end_sec}s: [AI SKIP] (内容重复)")
+            print(f"Time {start_sec}-{end_sec}s: [AI SKIP] (Silence)")
             return "SKIP"
-            
+        
+        # 长度熔断：为了保证音画同步，太长的直接丢弃
+        if len(description) > 20:
+             print(f"Time {start_sec}-{end_sec}s: [Ignored] Text too long ({len(description)} chars).")
+             return "SKIP"
+
         print(f"Time {start_sec}-{end_sec}s: {description}")
         return description
     except Exception as e:
         print(f"API Error: {e}")
-        return "SKIP" 
-
+        return "SKIP"
+    
 class MyVideoCapture:
     def __init__(self, source):
         self.cap = cv2.VideoCapture(source)
@@ -168,7 +198,7 @@ def main(config):
         if f_val > 0: fps = f_val
 
     engine = pyttsx3.init()
-    engine.setProperty('rate', 150)
+    engine.setProperty('rate', 180)
     final_audio_track = AudioSegment.empty()
     
     a = time.time()
