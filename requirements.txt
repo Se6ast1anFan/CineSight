@@ -23,3 +23,10 @@ requests==2.31.0
 psutil==7.1.3
 py-cpuinfo==9.0.0
 packaging==24.0
+
+# add
+pyttsx3<2.90
+python-dotenv
+volcengine-python-sdk
+pydub
+customtkinter
