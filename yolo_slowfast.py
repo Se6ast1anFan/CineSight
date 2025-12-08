@@ -33,74 +33,90 @@ client = Ark()
 model_id = os.getenv("ENDPOINT_ID")
 
 # --- 3. 豆包生成函数 ---
-def generate_description(actions_counter, start_sec, end_sec, last_narrative):
-    if not actions_counter:
+def generate_description(interval_data, start_sec, end_sec, last_narrative):
+    if not interval_data:
         return ""
     
-    # 1. 数据准备：保留频次信息，格式如 "car(26), run(8), stand(4)"
-    top_items_with_counts = [f"{k}({v})" for k, v in actions_counter.most_common(5)]
-    actions_str = ", ".join(top_items_with_counts)
+    # --- 步骤 A: 数据预处理 ---
     
+    # 1. 宏观统计 (物体/动作统计)
+    all_labels = [item['val'] for item in interval_data]
+    macro_counts = Counter(all_labels)
+    macro_str = ", ".join([f"{k}({v})" for k, v in macro_counts.most_common(6)])
+    
+    # 2. 微观追踪 (ID 统计)
+    person_actions = {} 
+    
+    for item in interval_data:
+        if item['type'] == 'person':
+            tid = item['id']
+            if tid not in person_actions:
+                person_actions[tid] = []
+            person_actions[tid].append(item['val'])
+            
+    # 人数硬逻辑拦截
+    unique_ids = list(person_actions.keys())
+    if len(unique_ids) > 3:
+        micro_str = f"检测到 {len(unique_ids)} 个不同人物(人群/Crowd)"
+    elif len(unique_ids) == 0:
+        micro_str = "无特定人物"
+    else:
+        track_summary = []
+        for tid in unique_ids:
+            acts = person_actions[tid]
+            if not acts: continue
+            most_common_act = Counter(acts).most_common(1)[0][0]
+            # Prompt 里也带上 ID，方便豆包区分
+            track_summary.append(f"Person_{tid}({most_common_act})")
+        micro_str = ", ".join(track_summary)
+
+    # --- 步骤 B: 构建 Prompt ---
     prompt = f"""
     【角色设定】
-    你是指向视障人士的专业影视音频解说员（Audio Description Specialist），严格遵循 Netflix 和 BBC 的无障碍解说标准。
-    你的任务是结合【标签频次权重】排除干扰，生成一句简短、客观、实时的场景解说。
-
-    【输入数据】（标签名+出现次数）：{actions_str}
+    你是指向视障人士的专业影视音频解说员，遵循 Netflix 标准。
+    
+    【输入数据】：
+    1. **物体/动作统计**: {macro_str}
+    2. **人物追踪信息**: {micro_str}
+    
     【上一时段解说】：{last_narrative}
 
-    【第一步：数据清洗逻辑（必须执行）】
-    1. **权重法则**：
-       - 如果 物体(如 car) 的频次远高于 动作(如 run)，说明是物体在移动导致的光流误判，**忽略该动作**。
-       - 示例：输入 "car(26), run(8)" -> 判定为只有车，没有人跑。
-    2. **组合联想**：
-       - 如果 动作(sit) 和 物体(car) 频次都高，组合为 "某人坐进车内" 或 "车内有人"。
-       - 示例：输入 "sit(10), car(12)" -> 输出 "某人坐进车内" 或 "车内有人"。
+    【解说生成规则 - 优先级由高到低】：
+    1. **去噪逻辑**：
+       - 如果物体(car)频次极高(>20)而动作(run)频次极低(<5)，忽略动作。
+    2. **共存逻辑 (核心)**：
+       - **如果 人 和 车(或其他大物体) 同时高频出现，必须同时提及。**
+       - 示例：输入 "Person_1(stand), car(15)" -> 输出 "一人站在车旁"。
+    3. **数量归纳**：
+       - 如果【人物追踪信息】显示“人群”或“>3个不同人物”，直接说“多人[动作]”，不要试图数数。
+       - 如果是具体ID（如 Person_1, Person_2），则精确描述人数（如“两人奔跑”）。
+    4. **去重静默**：
+       - 如果画面含义与【上一时段】基本一致，输出 "SKIP"。
 
-    【第二步：专业解说原则（严格遵守）】
-    1. **现在时态与主动语态**：
-       - 错误：画面中有一辆车在行驶。 (冗余)
-       - 正确：车辆行驶。 (BBC标准)
-       - 正确：两人交谈。 (Netflix标准)
-    2. **信息分级 (Who > Do > What)**：
-       - 优先描述“人做了什么动作”（如：run, talk, sit）。
-       - 其次描述“出现了什么核心物体”（如：car, dog）。
-       - 忽略低频背景噪音。
-    3. **去重与静默 (Silence is Gold)**：
-       - 如果清洗后的画面逻辑与【上一时段解说】大体一致（如一直在 "stand, talk"），**必须保持静默**，直接输出 "SKIP"。
-       - 只有画面发生**显著变化**（如动作改变、新物体出现）时才插话。
-    4. **严禁幻觉**：
-       - 标签里没有的物品绝不提及。
-       - 不猜测人物关系（不说“父子”，只说“两人”）。
-
-    【输出格式约束】：
-    - **字数限制**：15个汉字以内（确保在3秒内读完）。
-    - **纯文本**：不要标点符号以外的任何字符。
-    - **判定**：如果无需播报，仅输出单词 SKIP。
-
-    请生成解说：
+    【输出格式】：
+    - 15字以内。
+    - 纯中文，无标点符号。
+    - 若无新信息输出 SKIP。
     """
     
     try:
         completion = client.chat.completions.create(
             model=model_id,
             messages=[
-                {"role": "system", "content": "你是一个严谨的、基于数据权重的盲人辅助解说 AI。"},
+                {"role": "system", "content": "你是一个逻辑严密的盲人辅助解说员。"},
                 {"role": "user", "content": prompt},
             ],
-            temperature=0.1, # 低温以保证逻辑严格执行
+            temperature=0.1, 
         )
         description = completion.choices[0].message.content.strip()
         description = description.replace('"', '').replace("'", "").replace("\n", "")
         
-        # 逻辑判断：去重或跳过
         if "SKIP" in description or description == last_narrative:
             print(f"Time {start_sec}-{end_sec}s: [AI SKIP] (Silence)")
             return "SKIP"
         
-        # 长度熔断：为了保证音画同步，太长的直接丢弃
-        if len(description) > 20:
-             print(f"Time {start_sec}-{end_sec}s: [Ignored] Text too long ({len(description)} chars).")
+        if len(description) > 25:
+             print(f"Time {start_sec}-{end_sec}s: [Ignored] Text too long.")
              return "SKIP"
 
         print(f"Time {start_sec}-{end_sec}s: {description}")
@@ -108,7 +124,7 @@ def generate_description(actions_counter, start_sec, end_sec, last_narrative):
     except Exception as e:
         print(f"API Error: {e}")
         return "SKIP"
-    
+
 class MyVideoCapture:
     def __init__(self, source):
         self.cap = cv2.VideoCapture(source)
@@ -120,7 +136,6 @@ class MyVideoCapture:
         self.idx += 1
         ret, img = self.cap.read()
         if ret:
-            # 强制缩小到 720P
             height, width = img.shape[:2]
             if width > 1280:
                 scale = 1280 / width
@@ -146,7 +161,7 @@ class MyVideoCapture:
     def release(self):
         self.cap.release()
 
-# 辅助函数保持不变
+# 辅助函数
 def ava_inference_transform(clip, boxes, num_frames=32, crop_size=640, data_mean=[0.45, 0.45, 0.45], data_std=[0.225, 0.225, 0.225], slow_fast_alpha=4):
     boxes = np.array(boxes)
     roi_boxes = boxes.copy()
@@ -187,7 +202,7 @@ def main(config):
     cap = MyVideoCapture(config.input)
     print("Processing video frames...")
     
-    interval_actions = [] 
+    interval_data = [] 
     last_segment_narrative = "" 
     
     segment_duration = 5 
@@ -198,7 +213,7 @@ def main(config):
         if f_val > 0: fps = f_val
 
     engine = pyttsx3.init()
-    engine.setProperty('rate', 180)
+    engine.setProperty('rate', 180) 
     final_audio_track = AudioSegment.empty()
     
     a = time.time()
@@ -219,7 +234,7 @@ def main(config):
             deepsort_outputs.append(temp.astype(np.float32))
         yolo_preds.pred = deepsort_outputs
         
-        # --- 核心逻辑修改：行为识别 + 物体识别 ---
+        # SlowFast Inference
         if len(cap.stack) == 25:
             clip = cap.get_video_clip()
             if yolo_preds.pred[0].shape[0]:
@@ -233,38 +248,44 @@ def main(config):
                     slowfaster_preds = video_model(inputs, inp_boxes.to(device))
                     slowfaster_preds = slowfaster_preds.cpu()
                 
-                # 获取 SlowFast 预测结果
                 slowfast_labels = np.argmax(slowfaster_preds, axis=1).tolist()
                 
-                # --- 修改开始：混合使用 YOLO 和 SlowFast 的结果 ---
-                # 遍历每一个检测框
                 num_detections = yolo_preds.pred[0].shape[0]
                 preds = yolo_preds.pred[0]
                 
                 for i in range(num_detections):
-                    # 获取该框的类别 ID (YOLO 的第4列是 class id)
-                    # DeepSort output: [x1, y1, x2, y2, class_id, track_id, vx, vy]
                     cls_id = int(preds[i, 4])
+                    track_id = int(preds[i, 5])
                     
                     if cls_id == 0: 
-                        # 如果是人 (Class 0)，记录 SlowFast 的行为标签
+                        # 人：记录 ID
                         avalabel = slowfast_labels[i]
                         if avalabel + 1 < len(ava_labelnames):
-                            interval_actions.append(ava_labelnames[avalabel+1])
+                            label = ava_labelnames[avalabel+1]
+                            interval_data.append({'id': track_id, 'type': 'person', 'val': label})
                     else:
-                        # 如果不是人 (例如 Car, Dog)，记录 YOLO 的物体名称
-                        # model.names 包含所有类别名称 {0: 'person', 1: 'bicycle', 2: 'car'...}
+                        # 物体
                         if hasattr(model, 'names'):
                             obj_name = model.names[cls_id]
-                            interval_actions.append(obj_name)
-                # --- 修改结束 ---
+                            interval_data.append({'id': track_id, 'type': 'object', 'val': obj_name})
 
-        # 分段处理逻辑 (每5秒触发一次)
+        # 分段处理
         if current_time_sec > 0 and current_time_sec % segment_duration == 0 and current_time_sec != last_summary_time:
-            action_counts = Counter(interval_actions)
-            print(f"\n[DEBUG] {last_summary_time}-{current_time_sec}s 原始检测数据: {dict(action_counts)}")
             
-            text_result = generate_description(action_counts, last_summary_time, current_time_sec, last_segment_narrative)
+            # --- 修复：[DEBUG] 显示 ID ---
+            # 如果是人，显示 ID:val，否则显示 val
+            debug_list = []
+            for item in interval_data:
+                if item['type'] == 'person':
+                    debug_list.append(f"ID{item['id']}:{item['val']}")
+                else:
+                    debug_list.append(item['val'])
+            
+            debug_counts = Counter(debug_list)
+            print(f"\n[DEBUG] {last_summary_time}-{current_time_sec}s 原始标签: {dict(debug_counts)}")
+            # ---------------------------
+
+            text_result = generate_description(interval_data, last_summary_time, current_time_sec, last_segment_narrative)
             
             temp_wav = "temp_segment.wav"
             segment_audio = None
@@ -280,7 +301,6 @@ def main(config):
             else:
                 segment_audio = AudioSegment.silent(duration=0)
             
-            # 音频同步逻辑
             target_len_ms = segment_duration * 1000
             current_len_ms = len(segment_audio)
             
@@ -288,19 +308,22 @@ def main(config):
                 silence_gap = AudioSegment.silent(duration=target_len_ms - current_len_ms)
                 final_segment = segment_audio + silence_gap
             else:
-                final_segment = segment_audio[:target_len_ms] # 截断
+                final_segment = segment_audio[:target_len_ms] 
                 print(f"Warning: 语音过长，已截断。")
 
             final_audio_track += final_segment
-            interval_actions = []
+            interval_data = [] 
             last_summary_time = current_time_sec
             if os.path.exists(temp_wav): os.remove(temp_wav)
 
     # 处理尾部
-    if interval_actions:
-        action_counts = Counter(interval_actions)
-        print(f"\n[DEBUG] {last_summary_time}s-End 原始检测数据: {dict(action_counts)}")
-        text_result = generate_description(action_counts, last_summary_time, int(cap.idx // fps), last_segment_narrative)
+    if interval_data:
+        # 尾部 Debug
+        debug_list = [f"ID{x['id']}:{x['val']}" if x['type'] == 'person' else x['val'] for x in interval_data]
+        debug_counts = Counter(debug_list)
+        print(f"\n[DEBUG] {last_summary_time}-End 原始标签: {dict(debug_counts)}")
+        
+        text_result = generate_description(interval_data, last_summary_time, int(cap.idx // fps), last_segment_narrative)
         temp_wav = "temp_last.wav"
         if text_result and text_result != "SKIP":
             engine.save_to_file(text_result, temp_wav)
