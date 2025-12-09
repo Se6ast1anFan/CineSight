@@ -104,6 +104,7 @@ class App(ctk.CTk):
             # 构建命令
             command = [
                 sys.executable,
+                "-u",  
                 "yolo_slowfast.py",
                 "--input", self.selected_file_path,
                 "--output", self.output_wav_path, # 使用我们在 select_file 中计算好的路径
