@@ -56,7 +56,7 @@ def generate_description(interval_data, start_sec, end_sec, last_narrative):
             
     # 人数硬逻辑拦截
     unique_ids = list(person_actions.keys())
-    if len(unique_ids) > 3:
+    if len(unique_ids) > 2:
         micro_str = f"检测到 {len(unique_ids)} 个不同人物(人群/Crowd)"
     elif len(unique_ids) == 0:
         micro_str = "无特定人物"
@@ -88,7 +88,7 @@ def generate_description(interval_data, start_sec, end_sec, last_narrative):
        - **如果 人 和 车(或其他大物体) 同时高频出现，必须同时提及。**
        - 示例：输入 "Person_1(stand), car(15)" -> 输出 "一人站在车旁"。
     3. **数量归纳**：
-       - 如果【人物追踪信息】显示“人群”或“>3个不同人物”，直接说“多人[动作]”，不要试图数数。
+       - 如果【人物追踪信息】显示“人群”或“>2个不同人物”，直接说“多人[动作]”，不要试图数数。
        - 如果是具体ID（如 Person_1, Person_2），则精确描述人数（如“两人奔跑”）。
     4. **去重静默**：
        - 如果画面含义与【上一时段】基本一致，输出 "SKIP"。
