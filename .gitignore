@@ -15,6 +15,5 @@
 *.ts
 *.webm
 *.ipynb_checkpoints*
-*.md
 *.env
 *.wav
